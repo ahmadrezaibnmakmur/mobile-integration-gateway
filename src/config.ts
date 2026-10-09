@@ -1,9 +1,8 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 
 export type HubConfig = { anyfloBaseUrl: string; apiKeyName: string; anyfloApiKey: string };
-const configDir = () => process.env.DATA_DIR || join(process.cwd(), '.data');
-const configFile = () => join(configDir(), 'hub-config.json');
+const configDir = () => process.env.DATA_DIR || '/data';
+const configFile = () => `${configDir()}/hub-config.json`;
 const emptyConfig = (): HubConfig => ({ anyfloBaseUrl: '', apiKeyName: '', anyfloApiKey: '' });
 
 export async function loadHubConfig(): Promise<HubConfig> {
