@@ -32,7 +32,7 @@ const server = createServer(async (request, response) => {
   try {
     if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', anyfloConfigured: Boolean(anyfloBaseUrl && anyfloApiKey) });
     if (request.method === 'GET' && url.pathname === '/admin/overview') {
-      return send(response, 200, { anyfloConfigured: Boolean(anyfloBaseUrl && anyfloApiKey), mobileAppsConfigured: 0, dataContractsConfigured: 0, secretsAreServerOnly: true });
+      return send(response, 200, { anyfloConfigured: Boolean(anyfloBaseUrl && anyfloApiKey), mobileAdmissionCheckAvailable: true, relayTarget: 'AnyFlo API V2 per workflow', secretsAreServerOnly: true });
     }
     if (request.method === 'GET' && url.pathname === '/admin/anyflo/check') {
       await anyflo('/workflows?limit=1');
