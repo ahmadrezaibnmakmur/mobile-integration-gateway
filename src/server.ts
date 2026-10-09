@@ -5,7 +5,6 @@ import { extname, join, normalize } from 'node:path';
 const port = Number(process.env.PORT || 3000);
 const anyfloBaseUrl = (process.env.ANYFLO_API_BASE_URL || '').replace(/\/$/, '');
 const anyfloApiKey = process.env.ANYFLO_API_KEY || '';
-const adminToken = process.env.GATEWAY_ADMIN_TOKEN || '';
 const outletOps = { taskWorkflowId: process.env.OUTLET_OPS_TASK_WORKFLOW_ID || '', shiftWorkflowId: process.env.OUTLET_OPS_SHIFT_WORKFLOW_ID || '' };
 type Json = Record<string, unknown>;
 
@@ -24,7 +23,6 @@ async function mobileUser(request: IncomingMessage) {
   const response = await fetch(`${anyfloBaseUrl}/api/mobile/v1/auth/me`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
   return response.ok ? response.json() as Promise<Json> : null;
 }
-function isAdmin(request: IncomingMessage) { return Boolean(adminToken) && bearer(request) === adminToken; }
 function list(value: unknown): Json[] { return Array.isArray(value) ? value as Json[] : Array.isArray((value as Json)?.data) ? (value as Json).data as Json[] : []; }
 function ticketBelongsToUser(ticket: Json, user: Json) {
   const identity = new Set([user.id, user.email].filter(Boolean).map(String));
@@ -41,15 +39,13 @@ const server = createServer(async (request, response) => {
   try {
     if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', anyfloConfigured: Boolean(anyfloBaseUrl && anyfloApiKey) });
     if (request.method === 'GET' && url.pathname === '/admin/config') {
-      if (!isAdmin(request)) return send(response, 401, { error: 'Admin token required' });
       return send(response, 200, { anyfloBaseUrl: anyfloBaseUrl || null, apiKeyConfigured: Boolean(anyfloApiKey), outletOps, secretsAreServerOnly: true });
     }
     if (request.method === 'GET' && url.pathname === '/admin/anyflo/check') {
-      if (!isAdmin(request)) return send(response, 401, { error: 'Admin token required' });
-      return send(response, 200, { connected: true, result: await anyflo('/workflows?limit=1') });
+      await anyflo('/workflows?limit=1');
+      return send(response, 200, { connected: true });
     }
     if (request.method === 'GET' && url.pathname === '/admin/store-ops/check') {
-      if (!isAdmin(request)) return send(response, 401, { error: 'Admin token required' });
       if (!outletOps.taskWorkflowId || !outletOps.shiftWorkflowId) return send(response, 503, { error: 'Outlet Ops workflows are not configured' });
       const [tasks, shifts] = await Promise.all([anyflo(`/workflows/${outletOps.taskWorkflowId}/tickets?limit=1`), anyflo(`/workflows/${outletOps.shiftWorkflowId}/tickets?limit=1`)]);
       return send(response, 200, { connected: true, taskWorkflowId: outletOps.taskWorkflowId, shiftWorkflowId: outletOps.shiftWorkflowId, taskSampleCount: list(tasks).length, shiftSampleCount: list(shifts).length });
