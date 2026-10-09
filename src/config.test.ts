@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 process.env.DATA_DIR = await mkdtemp(join(tmpdir(), 'mobile-hub-config-'));
 const { loadHubConfig, saveHubConfig, publicHubConfig } = await import('./config.js');
+assert.deepEqual(await loadHubConfig(), { anyfloBaseUrl: '', apiKeyName: '', anyfloApiKey: '' });
 await saveHubConfig({ anyfloBaseUrl: 'https://anyflo.example/', apiKeyName: 'Staging', anyfloApiKey: 'secret-value' });
 const saved = await loadHubConfig();
 assert.equal(saved.anyfloBaseUrl, 'https://anyflo.example');

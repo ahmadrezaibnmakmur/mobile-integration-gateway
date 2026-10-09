@@ -12,9 +12,7 @@ The console has no application login screen. Keep its deployment reachable only 
 
 ## Required server environment
 
-Set `ANYFLO_API_BASE_URL` and `ANYFLO_API_KEY`. The API key remains server-only.
-
-Attach persistent storage at `/data`. The administrator can then set or replace the AnyFlo base URL, API key label, and API key from the Hub UI; the key is stored server-side and is never returned by the API or browser UI.
+Attach persistent storage at `/data`. A new Hub deliberately starts disconnected: the administrator sets the AnyFlo base URL, API key label, and API key in the Hub UI. The key is stored server-side and is never returned by the API or browser UI.
 
 Mobile clients use an AnyFlo Mobile Admission bearer token. The gateway never exposes the server-only API key.
 

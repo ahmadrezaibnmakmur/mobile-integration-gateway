@@ -4,17 +4,13 @@ import { join } from 'node:path';
 export type HubConfig = { anyfloBaseUrl: string; apiKeyName: string; anyfloApiKey: string };
 const configDir = () => process.env.DATA_DIR || join(process.cwd(), '.data');
 const configFile = () => join(configDir(), 'hub-config.json');
-const envConfig = (): HubConfig => ({
-  anyfloBaseUrl: (process.env.ANYFLO_API_BASE_URL || '').replace(/\/$/, ''),
-  apiKeyName: process.env.ANYFLO_API_KEY_NAME || 'AnyFlo API key',
-  anyfloApiKey: process.env.ANYFLO_API_KEY || '',
-});
+const emptyConfig = (): HubConfig => ({ anyfloBaseUrl: '', apiKeyName: '', anyfloApiKey: '' });
 
 export async function loadHubConfig(): Promise<HubConfig> {
   try {
     const stored = JSON.parse(await readFile(configFile(), 'utf8')) as Partial<HubConfig>;
-    return { ...envConfig(), ...stored, anyfloBaseUrl: (stored.anyfloBaseUrl || envConfig().anyfloBaseUrl).replace(/\/$/, '') };
-  } catch { return envConfig(); }
+    return { ...emptyConfig(), ...stored, anyfloBaseUrl: (stored.anyfloBaseUrl || '').replace(/\/$/, '') };
+  } catch { return emptyConfig(); }
 }
 
 export async function saveHubConfig(input: Partial<HubConfig>): Promise<HubConfig> {
