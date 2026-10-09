@@ -25,6 +25,7 @@ async function mobileUser(request: IncomingMessage) {
   return response.ok ? response.json() as Promise<Json> : null;
 }
 function isAdmin(request: IncomingMessage) { return Boolean(adminToken) && bearer(request) === adminToken; }
+function list(value: unknown): Json[] { return Array.isArray(value) ? value as Json[] : Array.isArray((value as Json)?.data) ? (value as Json).data as Json[] : []; }
 function ticketBelongsToUser(ticket: Json, user: Json) {
   const identity = new Set([user.id, user.email].filter(Boolean).map(String));
   return Object.values(ticket).some((value) => Array.isArray(value) && value.some((item) => typeof item === 'string' ? identity.has(item) : Boolean(item && typeof item === 'object' && (identity.has(String((item as Json).id)) || identity.has(String((item as Json).email))))));
@@ -47,6 +48,12 @@ const server = createServer(async (request, response) => {
       if (!isAdmin(request)) return send(response, 401, { error: 'Admin token required' });
       return send(response, 200, { connected: true, result: await anyflo('/workflows?limit=1') });
     }
+    if (request.method === 'GET' && url.pathname === '/admin/store-ops/check') {
+      if (!isAdmin(request)) return send(response, 401, { error: 'Admin token required' });
+      if (!outletOps.taskWorkflowId || !outletOps.shiftWorkflowId) return send(response, 503, { error: 'Outlet Ops workflows are not configured' });
+      const [tasks, shifts] = await Promise.all([anyflo(`/workflows/${outletOps.taskWorkflowId}/tickets?limit=1`), anyflo(`/workflows/${outletOps.shiftWorkflowId}/tickets?limit=1`)]);
+      return send(response, 200, { connected: true, taskWorkflowId: outletOps.taskWorkflowId, shiftWorkflowId: outletOps.shiftWorkflowId, taskSampleCount: list(tasks).length, shiftSampleCount: list(shifts).length });
+    }
     if (request.method === 'GET' && url.pathname === '/api/mobile/v1/session') {
       const user = await mobileUser(request); return user ? send(response, 200, { authenticated: true, user }) : send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
     }
@@ -54,7 +61,6 @@ const server = createServer(async (request, response) => {
       const user = await mobileUser(request); if (!user) return send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
       if (!outletOps.taskWorkflowId || !outletOps.shiftWorkflowId) return send(response, 503, { error: 'Outlet Ops workflows are not configured' });
       const [tasks, shifts] = await Promise.all([anyflo(`/workflows/${outletOps.taskWorkflowId}/tickets?limit=100`), anyflo(`/workflows/${outletOps.shiftWorkflowId}/tickets?limit=100`)]);
-      const list = (value: unknown) => Array.isArray(value) ? value : Array.isArray((value as Json)?.data) ? (value as Json).data as Json[] : [];
       return send(response, 200, { user, tasks: list(tasks).filter((ticket) => ticketBelongsToUser(ticket, user)), shifts: list(shifts).filter((ticket) => ticketBelongsToUser(ticket, user)) });
     }
     const taskMatch = url.pathname.match(/^\/api\/mobile\/v1\/apps\/outlet-ops\/tasks\/([^/]+)$/);
