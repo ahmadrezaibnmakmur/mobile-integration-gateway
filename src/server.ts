@@ -55,6 +55,18 @@ async function mobileUser(request: IncomingMessage) {
   const response = await fetch(`${config.anyfloBaseUrl}/api/mobile/v1/auth/me`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
   return response.ok ? response.json() as Promise<Json> : null;
 }
+async function proxyMobileAdmission(request: IncomingMessage, response: ServerResponse, url: URL) {
+  const config = await loadHubConfig();
+  if (!config.anyfloBaseUrl) return send(response, 503, { error: 'AnyFlo server credentials are not configured' });
+  const body = ['POST', 'PUT', 'PATCH'].includes(request.method || '') ? await jsonBody(request) : undefined;
+  const upstream = await fetch(`${config.anyfloBaseUrl}${url.pathname}`, {
+    method: request.method,
+    headers: { accept: 'application/json', ...(bearer(request) ? { authorization: `Bearer ${bearer(request)}` } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  response.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') || 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  response.end(await upstream.text());
+}
 function contentType(path: string) { return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' } as Record<string, string>)[extname(path)] || 'application/octet-stream'; }
 async function serveStatic(pathname: string, response: ServerResponse) {
   const relative = pathname === '/' ? 'index.html' : pathname.slice(1); const safe = normalize(relative).replace(/^\.\.(\/|\\|$)/, '');
@@ -91,6 +103,13 @@ const server = createServer(async (request, response) => {
       if (!input.path?.startsWith('/') || !isRelayRoute(method, target.pathname)) return send(response, 400, { error: 'Unsupported AnyFlo API V2 route' });
       const upstream = await relayV2(await loadHubConfig(), `${target.pathname}${target.search}`, method, ['POST', 'PUT', 'PATCH'].includes(method) ? input.body : undefined);
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' }); return response.end(upstream.body);
+    }
+    if (/^\/api\/mobile\/v1\/auth\/(google\/start|google\/exchange|me|refresh|logout)$/.test(url.pathname)) return proxyMobileAdmission(request, response, url);
+    if (request.method === 'GET' && url.pathname === '/api/mobile/v1/storage/presigned-url') {
+      const user = await mobileUser(request); if (!user) return send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
+      const config = await loadHubConfig();
+      const upstream = await fetch(`${config.anyfloBaseUrl}/api/storage/presigned-url${url.search}`, { headers: { accept: 'application/json' } });
+      response.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') || 'application/json; charset=utf-8', 'cache-control': 'no-store' }); return response.end(await upstream.text());
     }
     if (request.method === 'GET' && url.pathname === '/api/mobile/v1/session') {
       const user = await mobileUser(request); return user ? send(response, 200, { authenticated: true, user }) : send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
