@@ -1,10 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
+import { loadHubConfig, publicHubConfig, saveHubConfig, type HubConfig } from './config.js';
 
 const port = Number(process.env.PORT || 3000);
-const anyfloBaseUrl = (process.env.ANYFLO_API_BASE_URL || '').replace(/\/$/, '');
-const anyfloApiKey = process.env.ANYFLO_API_KEY || '';
 type Json = Record<string, unknown>;
 
 function send(response: ServerResponse, status: number, body: Json) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); response.end(JSON.stringify(body)); }
@@ -34,24 +33,26 @@ function resolveCurrentUser(value: unknown, user: Json): unknown {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveCurrentUser(item, user)]));
   return value;
 }
-async function relayV2(path: string, method: string, body: unknown) {
-  if (!anyfloBaseUrl || !anyfloApiKey) throw new Error('AnyFlo server credentials are not configured');
-  const response = await fetch(`${anyfloBaseUrl}/api/v2${path}`, {
-    method, headers: { 'x-api-key': anyfloApiKey, accept: 'application/json', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+async function relayV2(config: HubConfig, path: string, method: string, body: unknown) {
+  if (!config.anyfloBaseUrl || !config.anyfloApiKey) throw new Error('AnyFlo server credentials are not configured');
+  const response = await fetch(`${config.anyfloBaseUrl}/api/v2${path}`, {
+    method, headers: { 'x-api-key': config.anyfloApiKey, accept: 'application/json', ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   return { status: response.status, contentType: response.headers.get('content-type') || 'application/json; charset=utf-8', body: await response.text() };
 }
 async function anyflo(path: string, options: RequestInit = {}) {
-  if (!anyfloBaseUrl || !anyfloApiKey) throw new Error('AnyFlo server credentials are not configured');
-  const response = await fetch(`${anyfloBaseUrl}/api/v2${path}`, { ...options, headers: { 'x-api-key': anyfloApiKey, accept: 'application/json', ...options.headers } });
+  const config = await loadHubConfig();
+  if (!config.anyfloBaseUrl || !config.anyfloApiKey) throw new Error('AnyFlo server credentials are not configured');
+  const response = await fetch(`${config.anyfloBaseUrl}/api/v2${path}`, { ...options, headers: { 'x-api-key': config.anyfloApiKey, accept: 'application/json', ...options.headers } });
   const text = await response.text(); let body: unknown = null; try { body = text ? JSON.parse(text) : null; } catch { body = { error: text }; }
   if (!response.ok) throw Object.assign(new Error(`AnyFlo returned ${response.status}`), { status: response.status, body });
   return body;
 }
 async function mobileUser(request: IncomingMessage) {
-  const token = bearer(request); if (!token || !anyfloBaseUrl) return null;
-  const response = await fetch(`${anyfloBaseUrl}/api/mobile/v1/auth/me`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
+  const config = await loadHubConfig();
+  const token = bearer(request); if (!token || !config.anyfloBaseUrl) return null;
+  const response = await fetch(`${config.anyfloBaseUrl}/api/mobile/v1/auth/me`, { headers: { authorization: `Bearer ${token}`, accept: 'application/json' } });
   return response.ok ? response.json() as Promise<Json> : null;
 }
 function contentType(path: string) { return ({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' } as Record<string, string>)[extname(path)] || 'application/octet-stream'; }
@@ -63,13 +64,32 @@ async function serveStatic(pathname: string, response: ServerResponse) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
   try {
-    if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', anyfloConfigured: Boolean(anyfloBaseUrl && anyfloApiKey) });
+    if (request.method === 'GET' && url.pathname === '/health') { const config = await loadHubConfig(); return send(response, 200, { status: 'ok', anyfloConfigured: Boolean(config.anyfloBaseUrl && config.anyfloApiKey) }); }
     if (request.method === 'GET' && url.pathname === '/admin/overview') {
-      return send(response, 200, { anyfloConfigured: Boolean(anyfloBaseUrl && anyfloApiKey), mobileAdmissionCheckAvailable: true, relayTarget: 'AnyFlo API V2 per workflow', secretsAreServerOnly: true });
+      const config = await loadHubConfig(); return send(response, 200, { ...publicHubConfig(config), mobileAdmissionCheckAvailable: true, relayTarget: 'AnyFlo API V2 per workflow', secretsAreServerOnly: true });
     }
+    if (request.method === 'GET' && url.pathname === '/admin/config') return send(response, 200, publicHubConfig(await loadHubConfig()));
+    if (request.method === 'PUT' && url.pathname === '/admin/config') return send(response, 200, publicHubConfig(await saveHubConfig(await jsonBody(request) as Partial<HubConfig>)));
     if (request.method === 'GET' && url.pathname === '/admin/anyflo/check') {
       await anyflo('/workflows?limit=1');
       return send(response, 200, { connected: true });
+    }
+    if (request.method === 'GET' && url.pathname === '/admin/workflows') return send(response, 200, { result: await anyflo('/workflows') });
+    const dictionaryMatch = url.pathname.match(/^\/admin\/workflows\/([^/]+)\/(dictionary|schema)$/);
+    if (request.method === 'GET' && dictionaryMatch) return send(response, 200, { result: await anyflo(`/workflows/${encodeURIComponent(dictionaryMatch[1])}/${dictionaryMatch[2]}`) });
+    if (request.method === 'GET' && url.pathname === '/agent-guide') return send(response, 200, {
+      title: 'AnyFlo mobile application standard', runtimeBasePath: '/api/mobile/v1/v2', authentication: 'Bearer <Mobile Admission access token>',
+      workflowDiscovery: ['GET /workflows', 'GET /workflows/:workflowId/dictionary', 'GET /workflows/:workflowId/schema'],
+      ticketOperations: ['GET /workflows/:workflowId/tickets', 'POST /workflows/:workflowId/tickets/search', 'POST /workflows/:workflowId/tickets', 'GET /tickets/:ticketId', 'PUT /tickets/:ticketId', 'PATCH /tickets/:ticketId/array-fields/:arrayField/rows/:rowId', 'POST /tickets/:ticketId/comments'],
+      identityPlaceholders: ['$currentUser.id', '$currentUser.email', '$currentUser.role.id', '$currentUser.department.id'],
+      rules: ['Read the dictionary before building a form or query.', 'Use runtimeBasePath, never an AnyFlo API key in an APK.', 'Workflow Groups are web navigation, not an integration requirement.', 'Use Mobile Admission and secure device storage for mobile tokens.'],
+    });
+    if (request.method === 'POST' && url.pathname === '/admin/v2/request') {
+      const input = await jsonBody(request) as { method?: string; path?: string; body?: unknown };
+      const target = new URL(input.path || '', 'http://hub'); const method = (input.method || 'GET').toUpperCase();
+      if (!input.path?.startsWith('/') || !isRelayRoute(method, target.pathname)) return send(response, 400, { error: 'Unsupported AnyFlo API V2 route' });
+      const upstream = await relayV2(await loadHubConfig(), `${target.pathname}${target.search}`, method, ['POST', 'PUT', 'PATCH'].includes(method) ? input.body : undefined);
+      response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' }); return response.end(upstream.body);
     }
     if (request.method === 'GET' && url.pathname === '/api/mobile/v1/session') {
       const user = await mobileUser(request); return user ? send(response, 200, { authenticated: true, user }) : send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
@@ -80,7 +100,7 @@ const server = createServer(async (request, response) => {
       if (!isRelayRoute(request.method || 'GET', targetPath)) return send(response, 404, { error: 'Unsupported AnyFlo API V2 route' });
       url.searchParams.forEach((value, key) => url.searchParams.set(key, String(resolveCurrentUser(value, user))));
       const body = ['POST', 'PUT', 'PATCH'].includes(request.method || '') ? resolveCurrentUser(await jsonBody(request), user) : undefined;
-      const upstream = await relayV2(`${targetPath}${url.search}`, request.method || 'GET', body);
+      const upstream = await relayV2(await loadHubConfig(), `${targetPath}${url.search}`, request.method || 'GET', body);
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' }); return response.end(upstream.body);
     }
     if (request.method === 'GET') return serveStatic(url.pathname, response);

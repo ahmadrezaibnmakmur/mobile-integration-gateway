@@ -7,11 +7,10 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
-    "check": "tsx src/server.test.ts"
+    "check": "tsx src/config.test.ts && tsx src/server.test.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
 }
-
