@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
-import { loadHubConfig, publicHubConfig, saveHubConfig, type HubConfig } from './config.js';
+import { clearHubConfig, loadHubConfig, publicHubConfig, saveHubConfig, type HubConfig } from './config.js';
 
 const port = Number(process.env.PORT || 3000);
 type Json = Record<string, unknown>;
@@ -70,6 +70,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/admin/config') return send(response, 200, publicHubConfig(await loadHubConfig()));
     if (request.method === 'PUT' && url.pathname === '/admin/config') return send(response, 200, publicHubConfig(await saveHubConfig(await jsonBody(request) as Partial<HubConfig>)));
+    if (request.method === 'DELETE' && url.pathname === '/admin/config') return send(response, 200, publicHubConfig(await clearHubConfig()));
     if (request.method === 'GET' && url.pathname === '/admin/anyflo/check') {
       await anyflo('/workflows?limit=1');
       return send(response, 200, { connected: true });
