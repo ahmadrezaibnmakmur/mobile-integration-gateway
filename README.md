@@ -118,6 +118,12 @@ Use `$currentUser.id`, `$currentUser.email`, `$currentUser.role.id`, or `$curren
 
 For ticket comment mentions, call `GET /api/mobile/v1/v2/tickets/:ticketId/mention-candidates?search=<URL-encoded text>&limit=<count>` with a Mobile Admission Bearer token. Hub forwards the query and upstream response; AnyFlo determines eligible candidates from ticket-workflow tracker access and enforces eligibility when posting comments. Do not invent recipients or fetch a global user list. Use the actual AnyFlo response/comment contract; upstream deployment must include this API V2 endpoint.
 
+For `POST /api/mobile/v1/v2/tickets/:ticketId/comments`, Hub always sets `modifiedBy` to the verified Mobile Admission profile email, overwriting any client-supplied author. The app may omit `modifiedBy`; missing profile email is rejected before forwarding. This protection applies to the authenticated mobile runtime, not the administrator playground.
+
+For AnyFlo to attribute the comment/notification to that user rather than the API key name, its backend must include `resolveCommentActor` and configure `MOBILE_HUB_API_KEY_ID` to the **internal ID of the dedicated API key actually used by Hub** (not its name, token, or webhook key). Restart/redeploy AnyFlo after changing its environment. Without a matching ID, AnyFlo deliberately falls back to the API key name. Do not make arbitrary integration keys trusted or reuse this trusted key outside Hub. Protect the admin playground, which otherwise could submit arbitrary author emails with the same trusted key.
+
+Mention recipients are separate from the comment author: use candidate emails in AnyFlo's supported mention encoding (`@email@domain.com` or rich-text `data-id="email@domain.com"`), not plain `@Display Name` or user UUIDs. Eligibility and notification creation remain authoritative in AnyFlo.
+
 The UI provides connection setup, a workflow list, live dictionary/schema inspection, an API V2 playground, a Mobile Admission readiness check, and an agent guide at `GET /agent-guide`. The guide supplies the Hub origin, Mobile Admission contract, readiness result, barebones scope, and explicit App Link/Universal Link next step. The playground is an administrator tool and uses the saved server credential; the mobile runtime must use `/api/mobile/v1/v2` with Mobile Admission instead.
 
 ## Mobile Admission readiness

@@ -170,6 +170,7 @@ const server = createServer(async (request, response) => {
       requiredUserInputs: ['The app name and local project folder, if not already given.', 'Approval of the proposed Android package name and/or iOS bundle identifier before App Link or Universal Link configuration.', 'A physical device or emulator for final callback verification.'],
       workflowDiscovery: ['GET /workflows', 'GET /workflows/:workflowId/dictionary', 'GET /workflows/:workflowId/schema'],
       ticketOperations: ['GET /workflows/:workflowId/tickets', 'POST /workflows/:workflowId/tickets/search', 'POST /workflows/:workflowId/tickets', 'GET /tickets/:ticketId', 'PUT /tickets/:ticketId', 'PATCH /tickets/:ticketId/array-fields/:arrayField/rows/:rowId', 'GET /tickets/:ticketId/mention-candidates?search=&limit=', 'POST /tickets/:ticketId/comments'],
+      commentAuthor: { source: 'Verified Mobile Admission profile email; Hub overwrites modifiedBy on mobile comment POST', anyfloPrerequisite: 'MOBILE_HUB_API_KEY_ID must match the internal ID of the dedicated Hub API key; backend must support resolveCommentActor', mentions: 'Use eligible candidate email IDs in supported AnyFlo mention encoding, not display names or UUIDs' },
       identityPlaceholders: ['$currentUser.id', '$currentUser.email', '$currentUser.role.id', '$currentUser.department.id'],
       rules: ['Read the dictionary before building a form or query.', 'Use hubBaseUrl + runtimeBasePath, never an AnyFlo API key in an APK.', 'Workflow Groups are web navigation, not an integration requirement.', 'Use Mobile Admission and secure device storage for mobile tokens.'],
     });
@@ -195,7 +196,12 @@ const server = createServer(async (request, response) => {
       const targetPath = url.pathname.slice('/api/mobile/v1/v2'.length) || '/workflows';
       if (!isRelayRoute(request.method || 'GET', targetPath)) return send(response, 404, { error: 'Unsupported AnyFlo API V2 route' });
       url.searchParams.forEach((value, key) => url.searchParams.set(key, String(resolveCurrentUser(value, user))));
-      const body = ['POST', 'PUT', 'PATCH'].includes(request.method || '') ? resolveCurrentUser(await jsonBody(request), user) : undefined;
+      let body = ['POST', 'PUT', 'PATCH'].includes(request.method || '') ? resolveCurrentUser(await jsonBody(request), user) : undefined;
+      if (request.method === 'POST' && /^\/tickets\/[^/]+\/comments$/.test(targetPath)) {
+        if (typeof user.email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(user.email)) return send(response, 401, { error: 'Verified mobile profile email required for comments' });
+        if (!body || typeof body !== 'object' || Array.isArray(body)) return send(response, 400, { error: 'Comment body must be an object' });
+        body = { ...body, modifiedBy: user.email };
+      }
       const upstream = await relayV2(await loadHubConfig(), `${targetPath}${url.search}`, request.method || 'GET', body);
       response.writeHead(upstream.status, { 'content-type': upstream.contentType, 'cache-control': 'no-store' }); return response.end(upstream.body);
     }

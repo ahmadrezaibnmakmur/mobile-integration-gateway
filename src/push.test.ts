@@ -127,13 +127,15 @@ await recovery.drain();
 assert.equal((recovery.overview().deliveries[0] as any).code, 'RECOVERED', 'Unsent queue survives process restart');
 recovery.close();
 
-const relayCalls: { url: string; method: string }[] = [];
-const upstream = createServer((req, res) => {
+const relayCalls: { url: string; method: string; body?: unknown }[] = [];
+const upstream = createServer(async (req, res) => {
   res.setHeader('content-type', 'application/json');
   if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer alice-token') res.end(JSON.stringify(alice));
   else if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer bob-token') res.end(JSON.stringify(bob));
+  else if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer no-email-token') res.end(JSON.stringify({ id: 'no-email' }));
   else if (req.url?.startsWith('/api/v2/') && req.headers['x-api-key'] === 'fixture') {
-    relayCalls.push({ url: req.url, method: req.method || '' });
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    relayCalls.push({ url: req.url, method: req.method || '', ...(raw ? { body: JSON.parse(raw) } : {}) });
     res.end(JSON.stringify({ users: [{ id: 'eligible-user', name: 'Eligible user' }] }));
   } else { res.statusCode = 401; res.end('{}'); }
 });
@@ -162,6 +164,19 @@ try {
   assert.equal(relayCalls.length, 1);
   assert.equal((await post('/admin/v2/request', { method: 'GET', path: mentionPath })).status, 200);
   assert.deepEqual(relayCalls[1], { url: '/api/v2' + mentionPath, method: 'GET' });
+  const commentsPath = '/api/mobile/v1/v2/tickets/fixture-ticket/comments';
+  assert.equal((await post(commentsPath, { comment: 'Anonymous' })).status, 401);
+  assert.equal((await post(commentsPath, { comment: 'Missing email' }, { authorization: 'Bearer no-email-token' })).status, 401);
+  for (const invalid of [null, [], 'text']) {
+    assert.equal((await post(commentsPath, invalid, { authorization: 'Bearer alice-token' })).status, 400);
+  }
+  assert.equal(relayCalls.length, 2);
+  for (const supplied of [undefined, '$currentUser.email', bob.email, 'MOBILE HUB']) {
+    assert.equal((await post(commentsPath, { comment: 'Identity test', ...(supplied === undefined ? {} : { modifiedBy: supplied }) }, { authorization: 'Bearer alice-token' })).status, 200);
+    assert.deepEqual(relayCalls.at(-1), { url: '/api/v2/tickets/fixture-ticket/comments', method: 'POST', body: { comment: 'Identity test', modifiedBy: alice.email } });
+  }
+  assert.equal((await post(commentsPath, { comment: 'Account switch', modifiedBy: alice.email }, { authorization: 'Bearer bob-token' })).status, 200);
+  assert.deepEqual(relayCalls.at(-1)?.body, { comment: 'Account switch', modifiedBy: bob.email });
   assert.equal((await post('/internal/events/mobile-notification', event)).status, 401);
   assert.equal((await post('/internal/events/mobile-notification', event, { 'X-AnyFlo-Hub-Secret': 'wrong' })).status, 401);
   assert.equal((await post('/internal/events/mobile-notification', {}, { 'X-AnyFlo-Hub-Secret': 'test-secret' })).status, 400);
