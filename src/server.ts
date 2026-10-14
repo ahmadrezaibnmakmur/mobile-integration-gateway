@@ -4,6 +4,7 @@ import { extname, join, normalize } from 'node:path';
 import { clearHubConfig, loadHubConfig, publicHubConfig, saveHubConfig, type HubConfig } from './config.js';
 import { createPushEngine, initializeWebhookSecret, validateEvent, verifyWebhookSecret, webhookSecret } from './push.js';
 import { loadPushApps } from './push-providers.js';
+import { testReceiver } from './receiver-test.js';
 
 const port = Number(process.env.PORT || 3000);
 const push = createPushEngine(loadPushApps());
@@ -132,6 +133,12 @@ const server = createServer(async (request, response) => {
       return send(response, 200, push.unregister({ id: user.id, email: user.email }, deviceMatch[1]));
     }
     if (request.method === 'GET' && url.pathname === '/admin/push') return send(response, 200, push.overview());
+    if (request.method === 'POST' && url.pathname === '/admin/push/test-event') {
+      if (request.headers['x-hub-test'] !== 'receiver' || !request.headers['content-type']?.startsWith('application/json')) return send(response, 400, { error: 'Use the Hub Test Event panel with JSON content' });
+      if (request.headers.origin && request.headers.origin !== publicHubUrl(request)) return send(response, 403, { error: 'Cross-origin test requests are not allowed' });
+      const input = await jsonBody(request) as { scenario?: string };
+      return send(response, 200, await testReceiver(`http://127.0.0.1:${(server.address() as { port: number }).port}`, input?.scenario || 'all'));
+    }
     if (request.method === 'GET' && url.pathname === '/health') { const config = await loadHubConfig(); return send(response, 200, { status: 'ok', anyfloConfigured: Boolean(config.anyfloBaseUrl && config.anyfloApiKey) }); }
     if (request.method === 'GET' && url.pathname === '/admin/overview') {
       const config = await loadHubConfig(); return send(response, 200, { ...publicHubConfig(config), mobileAdmissionCheckAvailable: true, relayTarget: 'AnyFlo API V2 per workflow', secretsAreServerOnly: true });
@@ -149,6 +156,7 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && dictionaryMatch) return send(response, 200, { result: await anyflo(`/workflows/${encodeURIComponent(dictionaryMatch[1])}/${dictionaryMatch[2]}`) });
     if (request.method === 'GET' && url.pathname === '/agent-guide') return send(response, 200, {
       title: 'AnyFlo Mobile Admission Readiness & Barebones Guide', hubBaseUrl: publicHubUrl(request), runtimeBasePath: '/api/mobile/v1/v2', authentication: 'Bearer <Mobile Admission access token>',
+      eventTesting: { ui: 'Test Event panel', endpoint: 'POST /admin/push/test-event', headers: { 'X-Hub-Test': 'receiver' }, body: { scenario: 'all | comment-mention | general-notification | broadcast' }, scope: 'Fixed synthetic recipient, receiver loopback test only. Does not verify the AnyFlo publisher or send to real devices.', diagnostics: 'GET /admin/push' },
       push: { registerDevice: 'POST /api/mobile/v1/devices', unregisterDevice: 'DELETE /api/mobile/v1/devices/:deviceId', body: { applicationId: '<server-registered app>', platform: 'android | ios', provider: 'fcm | apns', installationId: '<persisted random device installation ID>', token: '<provider registration token>' }, rules: ['Use Mobile Admission bearer authentication. The server derives device ownership.', 'Register on login and whenever the provider token changes. Unregister before logout/account switching.', 'Handle deepLink as a validated route/id object; fetch ticket data using the admitted session.', 'Push may be missed or delayed; refresh app data on resume.'] },
       mobileAdmission: {
         authBasePath: '/api/mobile/v1/auth',

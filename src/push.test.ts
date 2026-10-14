@@ -177,6 +177,15 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   assert.equal(deliveryStatus, 'not_configured', 'HTTP accepted event reaches the asynchronous worker and records provider configuration gap');
+  assert.equal((await post('/admin/push/test-event', { scenario: 'all' })).status, 400);
+  assert.equal((await post('/admin/push/test-event', { scenario: 'all' }, { 'X-Hub-Test': 'receiver', origin: 'https://untrusted.example' })).status, 403);
+  assert.equal((await post('/admin/push/test-event', { scenario: 'invalid' }, { 'X-Hub-Test': 'receiver' })).status, 400);
+  const uiTest = await (await post('/admin/push/test-event', { scenario: 'all' }, { 'X-Hub-Test': 'receiver' })).json() as any;
+  assert.equal(uiTest.passed, true);
+  assert.equal(uiTest.results.length, 3);
+  assert.equal(uiTest.anyfloChanged, false);
+  assert.ok(!JSON.stringify(uiTest).includes('test-secret'));
+  assert.ok(uiTest.results.every((x: any) => x.payload.recipient.id === 'hub-ui-test-recipient' && x.accepted.httpStatus === 202 && x.duplicates.length === 3));
   assert.equal((await fetch(`${url}/api/mobile/v1/devices/${device.id}`, { method: 'DELETE', headers: { authorization: 'Bearer alice-token' } })).status, 200);
 } finally {
   child.kill('SIGTERM'); await once(child, 'exit'); await new Promise<void>(resolve => upstream.close(() => resolve()));
