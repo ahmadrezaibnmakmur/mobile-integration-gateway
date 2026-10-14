@@ -20,6 +20,7 @@ async function jsonBody(request: IncomingMessage): Promise<unknown> {
   try { return JSON.parse(raw); } catch { throw Object.assign(new Error('Valid JSON body required'), { status: 400 }); }
 }
 const relayRules = [
+  ['GET', /^\/tickets\/[^/]+\/mention-candidates$/],
   ['GET', /^\/workflows$/], ['GET', /^\/workflows\/[^/]+\/(schema|dictionary)$/],
   ['POST', /^\/workflows\/[^/]+\/deduplication\/check$/], ['POST', /^\/workflows\/[^/]+\/tickets\/search$/],
   ['GET', /^\/workflows\/[^/]+\/tickets$/], ['POST', /^\/workflows\/[^/]+\/tickets$/],
@@ -168,7 +169,7 @@ const server = createServer(async (request, response) => {
       barebonesScope: ['Build Google Admission login first.', 'After successful admission, show an empty authenticated Home.', 'Provide an Account page that displays the admitted user name, email, avatar when supplied, role, and department.', 'Unknown Google users must remain rejected by AnyFlo; never auto-provision them in the app.'],
       requiredUserInputs: ['The app name and local project folder, if not already given.', 'Approval of the proposed Android package name and/or iOS bundle identifier before App Link or Universal Link configuration.', 'A physical device or emulator for final callback verification.'],
       workflowDiscovery: ['GET /workflows', 'GET /workflows/:workflowId/dictionary', 'GET /workflows/:workflowId/schema'],
-      ticketOperations: ['GET /workflows/:workflowId/tickets', 'POST /workflows/:workflowId/tickets/search', 'POST /workflows/:workflowId/tickets', 'GET /tickets/:ticketId', 'PUT /tickets/:ticketId', 'PATCH /tickets/:ticketId/array-fields/:arrayField/rows/:rowId', 'POST /tickets/:ticketId/comments'],
+      ticketOperations: ['GET /workflows/:workflowId/tickets', 'POST /workflows/:workflowId/tickets/search', 'POST /workflows/:workflowId/tickets', 'GET /tickets/:ticketId', 'PUT /tickets/:ticketId', 'PATCH /tickets/:ticketId/array-fields/:arrayField/rows/:rowId', 'GET /tickets/:ticketId/mention-candidates?search=&limit=', 'POST /tickets/:ticketId/comments'],
       identityPlaceholders: ['$currentUser.id', '$currentUser.email', '$currentUser.role.id', '$currentUser.department.id'],
       rules: ['Read the dictionary before building a form or query.', 'Use hubBaseUrl + runtimeBasePath, never an AnyFlo API key in an APK.', 'Workflow Groups are web navigation, not an integration requirement.', 'Use Mobile Admission and secure device storage for mobile tokens.'],
     });

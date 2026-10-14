@@ -14,5 +14,6 @@ assert.match(source, /\$currentUser\.email/);
 assert.doesNotMatch(source, /outlet-ops|OUTLET_OPS|Outlet Ops/);
 assert.match(page, /Create ticket/);
 assert.match(page, /Update ticket/);
+assert.match(page, /Mention candidates/);
 assert.match(page, /Mobile Admission readiness/);
 console.log('Gateway boundary checks passed');

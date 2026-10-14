@@ -127,11 +127,15 @@ await recovery.drain();
 assert.equal((recovery.overview().deliveries[0] as any).code, 'RECOVERED', 'Unsent queue survives process restart');
 recovery.close();
 
+const relayCalls: { url: string; method: string }[] = [];
 const upstream = createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
   if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer alice-token') res.end(JSON.stringify(alice));
   else if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer bob-token') res.end(JSON.stringify(bob));
-  else { res.statusCode = 401; res.end('{}'); }
+  else if (req.url?.startsWith('/api/v2/') && req.headers['x-api-key'] === 'fixture') {
+    relayCalls.push({ url: req.url, method: req.method || '' });
+    res.end(JSON.stringify({ users: [{ id: 'eligible-user', name: 'Eligible user' }] }));
+  } else { res.statusCode = 401; res.end('{}'); }
 });
 upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
 await writeFile(join(dir, 'hub-config.json'), JSON.stringify({ anyfloBaseUrl: `http://127.0.0.1:${(upstream.address() as any).port}`, apiKeyName: 'fixture', anyfloApiKey: 'fixture' }));
@@ -140,6 +144,24 @@ try {
   const port = await listening(child);
   const url = `http://127.0.0.1:${port}`;
   const post = (path: string, body: unknown, headers = {}) => fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  const mentionPath = '/tickets/fixture-ticket/mention-candidates?search=Ana%20Maria&limit=7';
+  assert.equal((await fetch(url + '/api/mobile/v1/v2' + mentionPath)).status, 401);
+  assert.equal(relayCalls.length, 0);
+  const candidates = await fetch(url + '/api/mobile/v1/v2' + mentionPath, { headers: { authorization: 'Bearer alice-token' } });
+  assert.equal(candidates.status, 200);
+  assert.deepEqual(await candidates.json(), { users: [{ id: 'eligible-user', name: 'Eligible user' }] });
+  assert.equal(relayCalls.length, 1);
+  assert.equal(relayCalls[0].method, 'GET');
+  const forwardedMention = new URL(relayCalls[0].url, 'http://fixture');
+  assert.equal(forwardedMention.pathname, '/api/v2/tickets/fixture-ticket/mention-candidates');
+  assert.deepEqual([...forwardedMention.searchParams], [['search', 'Ana Maria'], ['limit', '7']]);
+  for (const path of ['/tickets/fixture-ticket/mention-candidates/extra', '/tickets/fixture-ticket/arbitrary', '/users']) {
+    assert.equal((await fetch(url + '/api/mobile/v1/v2' + path, { headers: { authorization: 'Bearer alice-token' } })).status, 404);
+  }
+  assert.equal((await post('/api/mobile/v1/v2/tickets/fixture-ticket/mention-candidates', {}, { authorization: 'Bearer alice-token' })).status, 404);
+  assert.equal(relayCalls.length, 1);
+  assert.equal((await post('/admin/v2/request', { method: 'GET', path: mentionPath })).status, 200);
+  assert.deepEqual(relayCalls[1], { url: '/api/v2' + mentionPath, method: 'GET' });
   assert.equal((await post('/internal/events/mobile-notification', event)).status, 401);
   assert.equal((await post('/internal/events/mobile-notification', event, { 'X-AnyFlo-Hub-Secret': 'wrong' })).status, 401);
   assert.equal((await post('/internal/events/mobile-notification', {}, { 'X-AnyFlo-Hub-Secret': 'test-secret' })).status, 400);
