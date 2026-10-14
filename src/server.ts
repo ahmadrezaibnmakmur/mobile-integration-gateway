@@ -183,7 +183,7 @@ const server = createServer(async (request, response) => {
     return send(response, 404, { error: 'Not found' });
   } catch (error) {
     const item = error as { message?: string; status?: number }; console.error('request failed', { path: url.pathname, status: item.status, message: item.message });
-    return send(response, item.status && item.status < 500 ? item.status : 502, { error: item.message || 'Gateway request failed' });
+    return send(response, item.status && (item.status < 500 || item.status === 503) ? item.status : 502, { error: item.message || 'Gateway request failed' });
   }
 });
 server.listen(port, () => console.log(`Mobile Integration Gateway listening on :${(server.address() as { port: number }).port}`));
