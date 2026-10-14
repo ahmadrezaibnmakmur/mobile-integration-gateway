@@ -1,10 +1,22 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, chmodSync } from 'node:fs';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { deliverPush, type PushApps, type PushMessage, type PushResult } from './push-providers.js';
 
 type User = { id: string; email: string };
+export const webhookSecretPath = () => join(process.env.DATA_DIR || '/data', 'mobile-hub-webhook-secret');
+export function webhookSecret(): string | undefined {
+  if (process.env.MOBILE_HUB_WEBHOOK_SECRET) return process.env.MOBILE_HUB_WEBHOOK_SECRET;
+  try { return readFileSync(webhookSecretPath(), 'utf8').trim() || undefined; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
+}
+export function initializeWebhookSecret() {
+  if (webhookSecret() || process.env.MOBILE_HUB_AUTO_GENERATE_SECRET === 'false') return;
+  mkdirSync(process.env.DATA_DIR || '/data', { recursive: true, mode: 0o700 });
+  try { writeFileSync(webhookSecretPath(), randomBytes(32).toString('hex'), { mode: 0o600, flag: 'wx' }); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+}
 export type NotificationEvent = PushMessage & {
   eventType: 'notification.created' | 'broadcast.published'; occurredAt: string; recipient: User;
   resource: { type: 'ticket' | 'broadcast'; id: string; workflowId?: string };
@@ -60,6 +72,10 @@ export class PushEngine {
       );
       CREATE INDEX IF NOT EXISTS device_recipient ON devices(user_id, active);
       CREATE INDEX IF NOT EXISTS delivery_queue ON deliveries(status);
+      CREATE TABLE IF NOT EXISTS receipts (
+        id TEXT PRIMARY KEY, event_id TEXT, event_type TEXT, recipient_ref TEXT,
+        outcome TEXT NOT NULL, http_status INTEGER NOT NULL, reason TEXT NOT NULL, received_at TEXT NOT NULL
+      );
     `);
   }
   private transaction<T>(fn: () => T): T {
@@ -100,7 +116,8 @@ export class PushEngine {
       const existing = this.db.prepare('SELECT hash FROM events WHERE id=?').get(event.eventId) as any;
       if (existing) {
         if (existing.hash !== hash) problem('eventId already exists with different payload', 409);
-        return { accepted: true, duplicate: true, eventId: event.eventId };
+        const receiptId = this.recordReceipt(event, 'duplicate', 200, 'EVENT_ALREADY_ACCEPTED');
+        return { accepted: true, duplicate: true, eventId: event.eventId, receiptId };
       }
       const now = new Date().toISOString();
       this.db.prepare('INSERT INTO events VALUES (?,?,?,?)').run(event.eventId, hash, payload, now);
@@ -108,8 +125,18 @@ export class PushEngine {
       const insert = this.db.prepare('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?)');
       for (const device of devices) insert.run(randomUUID(), event.eventId, device.id, 'pending', null, now, now);
       if (!devices.length) insert.run(randomUUID(), event.eventId, null, 'no_devices', 'NO_ACTIVE_DEVICES', now, now);
-      return { accepted: true, duplicate: false, eventId: event.eventId };
+      const receiptId = this.recordReceipt(event, 'accepted', 202, 'EVENT_PERSISTED');
+      return { accepted: true, duplicate: false, eventId: event.eventId, receiptId };
     });
+  }
+  recordReceipt(input: any, outcome: 'accepted' | 'duplicate' | 'rejected', status: number, reason: string) {
+    const safeId = typeof input?.eventId === 'string' && /^[A-Za-z0-9:_-]{1,512}$/.test(input.eventId) ? input.eventId : null;
+    const safeType = ['notification.created', 'broadcast.published'].includes(input?.eventType) ? input.eventType : null;
+    const recipient = typeof input?.recipient?.id === 'string' ? `sha256:${createHash('sha256').update(input.recipient.id).digest('hex').slice(0, 16)}` : null;
+    const id = randomUUID();
+    this.db.prepare('INSERT INTO receipts VALUES (?,?,?,?,?,?,?,?)').run(id, safeId, safeType, recipient, outcome, status, reason, new Date().toISOString());
+    this.db.exec('DELETE FROM receipts WHERE rowid < (SELECT MAX(rowid) - 9999 FROM receipts)');
+    return id;
   }
   async drain() {
     if (this.draining) return;
@@ -141,8 +168,11 @@ export class PushEngine {
     this.timer.unref();
   }
   overview() {
+    const secret = webhookSecret();
     return {
-      webhookConfigured: Boolean(process.env.MOBILE_HUB_WEBHOOK_SECRET),
+      webhookConfigured: Boolean(secret),
+      webhookSecretFingerprint: secret ? `sha256:${createHash('sha256').update(secret).digest('hex')}` : null,
+      receipts: this.db.prepare('SELECT id AS receiptId,event_id AS eventId,event_type AS eventType,recipient_ref AS recipientRef,outcome,http_status AS httpStatus,reason,received_at AS receivedAt FROM receipts ORDER BY rowid DESC LIMIT 100').all(),
       applications: Object.entries(this.apps).map(([id, app]) => ({ id, platforms: app.platforms, fcmConfigured: Boolean(app.fcm), apnsConfigured: Boolean(app.apns) })),
       devices: this.db.prepare('SELECT app_id AS applicationId,platform,provider,active,count(*) AS count FROM devices GROUP BY app_id,platform,provider,active').all(),
       deliveries: this.db.prepare('SELECT id,event_id AS eventId,status,code,created_at AS createdAt,updated_at AS updatedAt FROM deliveries ORDER BY created_at DESC LIMIT 100').all(),

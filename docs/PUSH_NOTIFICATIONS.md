@@ -14,7 +14,7 @@ This v1 worker supports ONE Hub process/replica using that local volume. Do not 
 
 Environment:
 
-- MOBILE_HUB_WEBHOOK_SECRET: the same server-only value as AnyFlo's MOBILE_HUB_WEBHOOK_SECRET. Missing configuration makes the event receiver return 503. Missing/wrong incoming header returns 401.
+- MOBILE_HUB_WEBHOOK_SECRET: optional server-side override matching AnyFlo's MOBILE_HUB_WEBHOOK_SECRET. When absent, Hub generates a cryptographically random 256-bit secret on startup at /data/mobile-hub-webhook-secret (0600, persistent, never returned by API). Set MOBILE_HUB_AUTO_GENERATE_SECRET=false only to deliberately disable bootstrap; if neither the variable nor the file provides a secret, the receiver returns 503. Missing/wrong incoming headers return 401.
 - PUSH_APPS_JSON: an application allowlist and optional provider credentials. Default {} means device registration is unavailable until an administrator configures an application. Missing provider configuration does not reject accepted events.
 - DATA_DIR: persistent directory, default /data.
 - PORT: default 3000.
@@ -50,6 +50,28 @@ The existing administrator console is intended for a trusted network. Its /admin
 ## AnyFlo configuration
 
 Set AnyFlo MOBILE_HUB_URL to the Hub HTTPS origin, MOBILE_HUB_ENABLED=true, and use the exact matching MOBILE_HUB_WEBHOOK_SECRET on both services. AnyFlo's existing comment-mention/broadcast publisher determines which recipients receive events. Hub uses recipient.id as the canonical identity, never an email provided by the mobile app.
+
+## Reception-only verification (no mobile provider required)
+
+Inspect GET /admin/push or the AnyFlo event reception diagnostics card. It exposes webhookConfigured, a SHA-256 fingerprint of the active shared secret, and the latest 100 receipts. Each receipt includes eventId, eventType, hashed recipientRef, receivedAt, accepted/duplicate/rejected outcome, HTTP status, and a safe reason code. The server retains the latest 10,000 receipt rows. Notification content and email addresses are omitted. Requests rejected before authentication have no trusted event/recipient identifiers.
+
+On first deployment, bootstrap creates the persistent shared secret automatically unless explicitly disabled. A server administrator can retrieve the file themselves using the service console and paste it directly into AnyFlo's environment secret field. Never paste the value into a chat, screenshot, source file, or log. If an environment override is used, that override takes precedence over the file. Confirm matching configuration using the SHA-256 fingerprint, not the secret value.
+
+Run inside the Hub service console:
+
+    cd /app
+    npm run test:receiver -- --url=https://<actual-Hub-host>
+
+The script reads the secret from server storage, sends three synthetic payloads (comment/mention notification, general notification, broadcast), then verifies six concurrent duplicate requests per payload. It also checks invalid payload and missing-secret rejection. It prints only event IDs, receipt IDs, statuses, and run timestamps. It does not change AnyFlo, register devices, or require FCM/APNs. The synthetic recipient has no devices and deliveries are logged as no_devices.
+
+Hub-only fixtures prove receiver compatibility, not that AnyFlo's live publisher has executed. To prove the latter, configure the matching secret and the non-secret AnyFlo variables below, then create a controlled comment mentioning a test user and publish a controlled broadcast. Compare AnyFlo's notification ID / broadcast:<broadcastId>:<recipientId> with Hub receipts. The current AnyFlo source only publishes notification.created for comments with commentId; general notification payloads are accepted by Hub but are not currently emitted by that source path.
+
+Required non-secret AnyFlo configuration:
+
+- MOBILE_HUB_URL=https://<actual-Hub-host> (origin only; AnyFlo appends /internal/events/mobile-notification)
+- MOBILE_HUB_ENABLED=true
+
+The only corresponding secret is MOBILE_HUB_WEBHOOK_SECRET. Restart/redeploy the AnyFlo backend after its operator sets these values. Do not change its API V2 or database schema for this receiver integration.
 
 ## Event receiver
 

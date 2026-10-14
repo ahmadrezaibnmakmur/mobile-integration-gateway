@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateKeyPairSync, verify } from 'node:crypto';
+import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { once, EventEmitter } from 'node:events';
@@ -157,8 +157,15 @@ try {
   assert.equal((await post('/api/mobile/v1/devices', { ...registration, userId: 'bob' }, { authorization: 'Bearer alice-token' })).status, 400);
   const summary = await (await fetch(url + '/admin/push')).text();
   assert.ok(!summary.includes('fcm-token-1')); assert.ok(!summary.includes('test-secret'));
+  assert.ok(!summary.includes(alice.email));
+  const receipts = JSON.parse(summary).receipts;
+  assert.equal(receipts.filter((x: any) => x.eventId === event.eventId && x.outcome === 'accepted').length, 1);
+  assert.equal(receipts.filter((x: any) => x.eventId === event.eventId && x.outcome === 'duplicate').length, 9);
+  assert.ok(receipts.some((x: any) => x.outcome === 'rejected' && x.reason === 'SECRET_INVALID'));
+  assert.ok(receipts.some((x: any) => x.outcome === 'rejected' && x.reason === 'EVENT_ID_CONFLICT'));
+  assert.ok(receipts.filter((x: any) => x.eventId === event.eventId).every((x: any) => x.recipientRef.startsWith('sha256:')));
   const page = await (await fetch(url + '/')).text();
-  assert.ok(page.includes('Push notification diagnostics'));
+  assert.ok(page.includes('AnyFlo event reception'));
   const guide = await (await fetch(url + '/agent-guide')).json() as any;
   assert.equal(guide.push.registerDevice, 'POST /api/mobile/v1/devices');
   const waitUntil = Date.now() + 4000;
@@ -174,11 +181,34 @@ try {
 } finally {
   child.kill('SIGTERM'); await once(child, 'exit'); await new Promise<void>(resolve => upstream.close(() => resolve()));
 }
-const unavailable = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: process.cwd(), env: { ...process.env, PORT: '0', DATA_DIR: dir, MOBILE_HUB_WEBHOOK_SECRET: '', PUSH_APPS_JSON: JSON.stringify(apps) }, stdio: ['ignore', 'pipe', 'pipe'] });
+const unavailable = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: process.cwd(), env: { ...process.env, PORT: '0', DATA_DIR: dir, MOBILE_HUB_WEBHOOK_SECRET: '', MOBILE_HUB_AUTO_GENERATE_SECRET: 'false', PUSH_APPS_JSON: JSON.stringify(apps) }, stdio: ['ignore', 'pipe', 'pipe'] });
 try {
   const port = await listening(unavailable);
   assert.equal((await fetch(`http://127.0.0.1:${port}/internal/events/mobile-notification`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 503);
 } finally {
   unavailable.kill('SIGTERM'); await once(unavailable, 'exit'); await rm(dir, { recursive: true, force: true });
+}
+const generatedDir = await mkdtemp(join(tmpdir(), 'hub-secret-test-'));
+const generatedEnv = { ...process.env, PORT: '0', DATA_DIR: generatedDir, MOBILE_HUB_WEBHOOK_SECRET: '', MOBILE_HUB_AUTO_GENERATE_SECRET: 'true', PUSH_APPS_JSON: '{}' };
+const generated = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: process.cwd(), env: generatedEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+try {
+  const port = await listening(generated);
+  const secretFile = join(generatedDir, 'mobile-hub-webhook-secret');
+  const secretValue = await readFile(secretFile, 'utf8');
+  assert.equal(secretValue.length, 64);
+  assert.equal((await stat(secretFile)).mode & 0o777, 0o600);
+  const info = await (await fetch(`http://127.0.0.1:${port}/admin/push`)).json() as any;
+  assert.equal(info.webhookConfigured, true);
+  assert.equal(info.webhookSecretFingerprint, `sha256:${createHash('sha256').update(secretValue).digest('hex')}`);
+  assert.ok(!JSON.stringify(info).includes(secretValue));
+  const verifier = spawn(process.execPath, ['--import', 'tsx', 'src/test-receiver.ts', `--url=http://127.0.0.1:${port}`], { cwd: process.cwd(), env: generatedEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = ''; verifier.stdout.on('data', data => { output += data; });
+  assert.equal((await once(verifier, 'exit'))[0], 0);
+  const proof = JSON.parse(output);
+  assert.equal(proof.fixtures.length, 3);
+  assert.ok(proof.fixtures.every((x: any) => x.acceptedStatus === 202 && x.concurrentDuplicates === 6));
+  assert.ok(!output.includes(secretValue));
+} finally {
+  generated.kill('SIGTERM'); await once(generated, 'exit'); await rm(generatedDir, { recursive: true, force: true });
 }
 console.log('Push receiver, ownership, persistence, concurrency, provider, and HTTP checks passed');

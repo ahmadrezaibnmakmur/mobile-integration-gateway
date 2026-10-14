@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
+    "test:receiver": "tsx src/test-receiver.ts",
     "check": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck src/*.ts && tsx src/config.test.ts && tsx src/server.test.ts && tsx src/push.test.ts"
   },
   "devDependencies": {

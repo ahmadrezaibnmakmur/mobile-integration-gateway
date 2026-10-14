@@ -2,11 +2,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { clearHubConfig, loadHubConfig, publicHubConfig, saveHubConfig, type HubConfig } from './config.js';
-import { createPushEngine, validateEvent, verifyWebhookSecret } from './push.js';
+import { createPushEngine, initializeWebhookSecret, validateEvent, verifyWebhookSecret, webhookSecret } from './push.js';
 import { loadPushApps } from './push-providers.js';
 
 const port = Number(process.env.PORT || 3000);
 const push = createPushEngine(loadPushApps());
+initializeWebhookSecret();
 push.start();
 type Json = Record<string, unknown>;
 
@@ -104,10 +105,20 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
   try {
     if (request.method === 'POST' && url.pathname === '/internal/events/mobile-notification') {
-      verifyWebhookSecret(request.headers['x-anyflo-hub-secret'], process.env.MOBILE_HUB_WEBHOOK_SECRET);
-      if (!request.headers['content-type']?.startsWith('application/json')) return send(response, 415, { error: 'Content-Type application/json required' });
-      const result = push.accept(validateEvent(await jsonBody(request)));
-      return send(response, result.duplicate ? 200 : 202, result);
+      let input: unknown;
+      try {
+        verifyWebhookSecret(request.headers['x-anyflo-hub-secret'], webhookSecret());
+        if (!request.headers['content-type']?.startsWith('application/json')) throw Object.assign(new Error('Content-Type application/json required'), { status: 415 });
+        input = await jsonBody(request);
+        const result = push.accept(validateEvent(input));
+        return send(response, result.duplicate ? 200 : 202, result);
+      } catch (error) {
+        const item = error as { status?: number; message?: string };
+        const status = item.status || 500;
+        const reason = status === 401 ? 'SECRET_INVALID' : status === 503 ? 'SECRET_NOT_CONFIGURED' : status === 409 ? 'EVENT_ID_CONFLICT' : status === 415 ? 'CONTENT_TYPE_INVALID' : status === 413 ? 'BODY_TOO_LARGE' : status === 400 ? 'PAYLOAD_INVALID' : 'PERSISTENCE_ERROR';
+        const receiptId = push.recordReceipt(input, 'rejected', status, reason);
+        return send(response, status, { error: status >= 500 ? reason : item.message || reason, reason, receiptId });
+      }
     }
     if (request.method === 'POST' && url.pathname === '/api/mobile/v1/devices') {
       const user = await mobileUser(request);
