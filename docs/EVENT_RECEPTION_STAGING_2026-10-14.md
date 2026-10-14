@@ -1,0 +1,63 @@
+# Hub staging event-reception evidence — 2026-10-14
+
+## Scope and result
+
+Hub staging is ready to receive the deployed AnyFlo publisher contract. Verified over its public HTTPS endpoint using Hub-only synthetic fixtures at 10:52:45 Asia/Jakarta (03:52:45 UTC). This is receiver-side verification, not proof that a real AnyFlo comment/broadcast has yet been emitted. AnyFlo configuration, code, and business data were not changed.
+
+Deployed implementation: 01a7d05 (main). Tests: npm run check passed, including bootstrap file permissions, fingerprint redaction, receipt audit, three fixtures, concurrency, and existing device/provider regression tests.
+
+## Live evidence
+
+Origin: https://mobile-integration-gateway-gateway.uhrdm7.easypanel.host
+Receiver: POST /internal/events/mobile-notification
+Header: X-AnyFlo-Hub-Secret
+Diagnostics: GET /admin/push and the AnyFlo event reception & push diagnostics UI card.
+
+Test run ID: 56e81767-c7e5-430a-acfc-21fc1af521ca
+
+| Fixture | Event ID | Receipt ID | First response | Concurrent retries |
+|---|---|---|---|---|
+| Comment/mention | hub-only-comment-mention-56e81767-c7e5-430a-acfc-21fc1af521ca | cbb4d07a-9d51-45e3-a81a-e42fc4116385 | 202 accepted | 6 × 200 duplicate |
+| General notification | hub-only-general-notification-56e81767-c7e5-430a-acfc-21fc1af521ca | 6011f098-9d2e-4a9c-927e-8b05e47caf21 | 202 accepted | 6 × 200 duplicate |
+| Broadcast | hub-only-broadcast-56e81767-c7e5-430a-acfc-21fc1af521ca | 55623d49-4c70-4bf9-8fa6-bfcad071cdb4 | 202 accepted | 6 × 200 duplicate |
+
+Totals: 3 accepted, 18 duplicate. Invalid authenticated payload produced 400 PAYLOAD_INVALID; missing-secret request produced 401 SECRET_INVALID. All are observable receipts. Recipient identifiers appear only as hash references. Provider credentials/device tokens were not required; all three delivery rows correctly show no_devices.
+
+## Secret readiness
+
+webhookConfigured=true. Hub generated a 256-bit secret in its persistent volume at /data/mobile-hub-webhook-secret, mode 0600. The value is not included in this document, console output, API diagnostics, or chat.
+
+Fingerprint of the active secret:
+
+    sha256:8451b2d22f322b2a412a9172c4d8756b249ddb1b7d1d8fb7b66c0a13cd13a7a8
+
+An authorized server operator retrieves the file value privately through the Hub service console and enters it directly into AnyFlo's MOBILE_HUB_WEBHOOK_SECRET environment variable. Do not copy the value into a message or screenshot. The environment override MOBILE_HUB_WEBHOOK_SECRET, if configured on Hub later, takes precedence over the file; compare the active fingerprint after any such change.
+
+## Exact AnyFlo operator configuration
+
+Non-secret values:
+
+    MOBILE_HUB_ENABLED=true
+    MOBILE_HUB_URL=https://mobile-integration-gateway-gateway.uhrdm7.easypanel.host
+
+Secret value: MOBILE_HUB_WEBHOOK_SECRET must match the Hub's stored secret. The URL is the origin only; the publisher appends /internal/events/mobile-notification itself. Restart/redeploy the AnyFlo backend after its operator applies the values.
+
+The reviewed AnyFlo publisher uses the matching header and body fields: eventId, eventType, occurredAt, recipient {id,email}, title, body, resource, deepLink. Comment/mention events use the notification ID; broadcast events use broadcast:<broadcastId>:<recipientId>. No payload mismatch was found.
+
+Current source emits notification.created for comment notifications with commentId and broadcast.published for each broadcast recipient. It does not currently publish general non-comment notifications through this path. Hub accepts their schema for forward compatibility; enabling that additional source behaviour would be a separate AnyFlo requirement if needed.
+
+## Completing live-source verification
+
+After the AnyFlo operator configures the matching secret and enablement, mention a controlled user in a real comment and publish a controlled broadcast. Look up their real notification/event IDs in Hub receipts. A successful live-source check must have accepted/duplicate receipts with those real IDs; the hub-only-* rows must not be mistaken for AnyFlo-generated events.
+
+No FCM/APNs configuration, mobile app, device registration, or push-delivery test is required for this stage.
+
+## Re-running Hub-only verification
+
+From the Hub container console:
+
+    cd /app
+    npm run test:receiver -- --url=https://mobile-integration-gateway-gateway.uhrdm7.easypanel.host
+
+The script reads its credential locally, never prints it, and creates a new synthetic run ID. Its output is safe to attach to an engineering report.
+
