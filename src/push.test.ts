@@ -9,11 +9,20 @@ import { once, EventEmitter } from 'node:events';
 import { PushEngine, validateEvent, verifyWebhookSecret } from './push.js';
 import { deliverPush, type PushApps } from './push-providers.js';
 
+async function listening(child: ReturnType<typeof spawn>) {
+  return new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Hub startup timeout')), 10_000);
+    child.once('exit', () => { clearTimeout(timeout); reject(new Error('Hub exited before startup')); });
+    child.stdout!.on('data', data => { const match = data.toString().match(/listening on :(\d+)/); if (match) { clearTimeout(timeout); resolve(match[1]); } });
+  });
+}
+
 const dir = await mkdtemp(join(tmpdir(), 'hub-push-test-'));
 const apps: PushApps = { demo: { platforms: ['android', 'ios'] } };
 const alice = { id: 'alice', email: 'alice@example.com' };
 const bob = { id: 'bob', email: 'bob@example.com' };
 const event = validateEvent({ eventId: 'event-1', eventType: 'notification.created', occurredAt: new Date().toISOString(), recipient: alice, title: 'A title', body: 'A message\nwith line break', resource: { type: 'ticket', id: 't1', workflowId: 'w1' }, deepLink: { route: 'ticket', id: 't1' } });
+const broadcast = validateEvent({ ...event, eventId: 'broadcast-1', eventType: 'broadcast.published', resource: { type: 'broadcast', id: 'b1' }, deepLink: { route: 'broadcast', id: 'b1' } });
 assert.throws(() => verifyWebhookSecret(undefined, 'test-secret'), /Invalid webhook secret/);
 assert.throws(() => verifyWebhookSecret('wrong', 'test-secret'), /Invalid webhook secret/);
 assert.throws(() => verifyWebhookSecret('test-secret', undefined), /not configured/);
@@ -63,6 +72,7 @@ const http = (async (url: string, options: any) => {
 }) as typeof fetch;
 assert.equal((await deliverPush({ platforms: ['android'], fcm }, 'fcm', 'device-token', event, http)).invalidToken, true);
 assert.equal(calls, 2);
+assert.equal((await deliverPush({ platforms: ['android'], fcm }, 'fcm', 'device-token', event, (async () => Response.json({ name: 'projects/project/messages/success' })) as typeof fetch)).status, 'sent');
 assert.equal((await deliverPush(apps.demo, 'apns', 'token', event)).status, 'not_configured');
 const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
 const apns = { teamId: 'team', keyId: 'key', privateKey: ec.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), bundleId: 'com.example.test', environment: 'sandbox' as const };
@@ -85,36 +95,90 @@ const apnsTransport = ((origin: string) => {
 }) as any;
 assert.equal((await deliverPush({ platforms: ['ios'], apns }, 'apns', 'apple-token', event, http, apnsTransport)).invalidToken, true);
 
+const successfulApnsTransport = (() => {
+  const session = new EventEmitter() as any; session.destroy = () => {};
+  session.request = () => {
+    const request = new EventEmitter() as any;
+    request.end = () => queueMicrotask(() => { request.emit('response', { ':status': 200 }); request.emit('end'); });
+    return request;
+  };
+  return session;
+}) as any;
+assert.equal((await deliverPush({ platforms: ['ios'], apns }, 'apns', 'apple-token', event, http, successfulApnsTransport)).status, 'sent');
+
+const captured: Array<{ token: string; eventId: string }> = [];
+const flow = new PushEngine(apps, join(dir, 'flow.sqlite'), async (_app, _provider, token, message) => {
+  captured.push({ token, eventId: message.eventId }); return { status: 'sent', code: 'MOCK_ACCEPTED' };
+});
+flow.register(alice, registration);
+flow.register(alice, { ...registration, platform: 'ios', installationId: 'iphone', provider: 'apns', token: 'a'.repeat(64) });
+flow.register(bob, { ...registration, installationId: 'bob-phone', token: 'bob-device' });
+flow.accept(broadcast); flow.accept(broadcast); await flow.drain();
+assert.equal(captured.length, 2, 'One delivery for each active recipient device, excluding another user');
+assert.ok(captured.every(x => x.eventId === broadcast.eventId && x.token !== 'bob-device'));
+assert.equal(flow.overview().deliveries.filter((x: any) => x.status === 'sent').length, 2);
+flow.close();
+
+const recoveryFile = join(dir, 'recovery.sqlite');
+let recovery = new PushEngine(apps, recoveryFile);
+recovery.register(alice, registration); recovery.accept(event); recovery.close();
+recovery = new PushEngine(apps, recoveryFile, async () => ({ status: 'sent', code: 'RECOVERED' }));
+await recovery.drain();
+assert.equal((recovery.overview().deliveries[0] as any).code, 'RECOVERED', 'Unsent queue survives process restart');
+recovery.close();
+
 const upstream = createServer((req, res) => {
   res.setHeader('content-type', 'application/json');
   if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer alice-token') res.end(JSON.stringify(alice));
+  else if (req.url === '/api/mobile/v1/auth/me' && req.headers.authorization === 'Bearer bob-token') res.end(JSON.stringify(bob));
   else { res.statusCode = 401; res.end('{}'); }
 });
 upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
 await writeFile(join(dir, 'hub-config.json'), JSON.stringify({ anyfloBaseUrl: `http://127.0.0.1:${(upstream.address() as any).port}`, apiKeyName: 'fixture', anyfloApiKey: 'fixture' }));
 const child = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: process.cwd(), env: { ...process.env, PORT: '0', DATA_DIR: dir, MOBILE_HUB_WEBHOOK_SECRET: 'test-secret', PUSH_APPS_JSON: JSON.stringify(apps) }, stdio: ['ignore', 'pipe', 'pipe'] });
 try {
-  const port = await new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Hub startup timeout')), 10_000);
-    child.once('exit', () => { clearTimeout(timeout); reject(new Error('Hub exited before startup')); });
-    child.stdout.on('data', data => { const match = data.toString().match(/listening on :(\d+)/); if (match) { clearTimeout(timeout); resolve(match[1]); } });
-  });
+  const port = await listening(child);
   const url = `http://127.0.0.1:${port}`;
   const post = (path: string, body: unknown, headers = {}) => fetch(url + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
   assert.equal((await post('/internal/events/mobile-notification', event)).status, 401);
+  assert.equal((await post('/internal/events/mobile-notification', event, { 'X-AnyFlo-Hub-Secret': 'wrong' })).status, 401);
   assert.equal((await post('/internal/events/mobile-notification', {}, { 'X-AnyFlo-Hub-Secret': 'test-secret' })).status, 400);
+  assert.equal((await fetch(url + '/internal/events/mobile-notification', { method: 'POST', headers: { 'X-AnyFlo-Hub-Secret': 'test-secret', 'content-type': 'text/plain' }, body: '{}' })).status, 415);
+  assert.equal((await fetch(url + '/internal/events/mobile-notification', { method: 'POST', headers: { 'X-AnyFlo-Hub-Secret': 'test-secret', 'content-type': 'application/json' }, body: '{' })).status, 400);
   assert.equal((await post('/api/mobile/v1/devices', registration)).status, 401);
   const device = await (await post('/api/mobile/v1/devices', registration, { authorization: 'Bearer alice-token' })).json() as any;
   assert.ok(device.id);
+  assert.equal((await post('/api/mobile/v1/devices', registration, { authorization: 'Bearer bob-token' })).status, 409);
+  assert.equal((await fetch(`${url}/api/mobile/v1/devices/${device.id}`, { method: 'DELETE', headers: { authorization: 'Bearer bob-token' } })).status, 404);
   const replies = await Promise.all(Array.from({ length: 10 }, () => post('/internal/events/mobile-notification', event, { 'X-AnyFlo-Hub-Secret': 'test-secret' })));
   assert.equal(replies.filter(r => r.status === 202).length, 1);
   assert.equal(replies.filter(r => r.status === 200).length, 9);
+  assert.equal((await post('/internal/events/mobile-notification', { ...event, title: 'Changed payload' }, { 'X-AnyFlo-Hub-Secret': 'test-secret' })).status, 409);
   assert.equal((await post('/api/mobile/v1/devices', { ...registration, userId: 'bob' }, { authorization: 'Bearer alice-token' })).status, 400);
   const summary = await (await fetch(url + '/admin/push')).text();
   assert.ok(!summary.includes('fcm-token-1')); assert.ok(!summary.includes('test-secret'));
+  const page = await (await fetch(url + '/')).text();
+  assert.ok(page.includes('Push notification diagnostics'));
+  const guide = await (await fetch(url + '/agent-guide')).json() as any;
+  assert.equal(guide.push.registerDevice, 'POST /api/mobile/v1/devices');
+  const waitUntil = Date.now() + 4000;
+  let deliveryStatus = '';
+  while (Date.now() < waitUntil) {
+    const status = await (await fetch(url + '/admin/push')).json() as any;
+    deliveryStatus = status.deliveries.find((x: any) => x.eventId === event.eventId)?.status;
+    if (deliveryStatus === 'not_configured') break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(deliveryStatus, 'not_configured', 'HTTP accepted event reaches the asynchronous worker and records provider configuration gap');
   assert.equal((await fetch(`${url}/api/mobile/v1/devices/${device.id}`, { method: 'DELETE', headers: { authorization: 'Bearer alice-token' } })).status, 200);
 } finally {
   child.kill('SIGTERM'); await once(child, 'exit'); await new Promise<void>(resolve => upstream.close(() => resolve()));
-  await rm(dir, { recursive: true, force: true });
+}
+const unavailable = spawn(process.execPath, ['--import', 'tsx', 'src/server.ts'], { cwd: process.cwd(), env: { ...process.env, PORT: '0', DATA_DIR: dir, MOBILE_HUB_WEBHOOK_SECRET: '', PUSH_APPS_JSON: JSON.stringify(apps) }, stdio: ['ignore', 'pipe', 'pipe'] });
+try {
+  const port = await listening(unavailable);
+  assert.equal((await fetch(`http://127.0.0.1:${port}/internal/events/mobile-notification`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 503);
+} finally {
+  unavailable.kill('SIGTERM'); await once(unavailable, 'exit'); await rm(dir, { recursive: true, force: true });
 }
 console.log('Push receiver, ownership, persistence, concurrency, provider, and HTTP checks passed');

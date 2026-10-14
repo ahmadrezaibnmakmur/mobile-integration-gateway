@@ -139,6 +139,8 @@ Negative receiver test (contains no secret):
 
 Expect 401 when configured, or 503 when the secret is not set.
 
+The current staging Easypanel edge can replace the application's 503 response with a generic 502 HTML error page. Check /health, /admin/push, and the process log before interpreting this as a crash. In the verified unconfigured state, the process log records status 503 and a missing webhook-secret message while /health remains healthy. Do not change AnyFlo or activate its publisher to work around an unconfigured Hub.
+
 Authorized test: a local, mode-0600 headers file contains Content-Type plus the shared-secret header. Load it through curl's header-file option:
 
     curl -i -X POST "$HUB_URL/internal/events/mobile-notification" \
@@ -156,4 +158,3 @@ Verify other-user unregister is denied, owner unregister succeeds, token rotatio
 ## Automated verification
 
 Run npm run check. Tests cover shared-secret validation, payload mismatch, device ownership, token rotation, persistent event deduplication, concurrent HTTP retries, missing provider configuration, invalid token deactivation, provider request encoding, and API response redaction. External provider calls in automated tests use fixtures; real FCM/APNs delivery requires actual credentials and devices.
-
