@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, verify } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
+import { once, EventEmitter } from 'node:events';
 import { PushEngine, validateEvent, verifyWebhookSecret } from './push.js';
 import { deliverPush, type PushApps } from './push-providers.js';
 
@@ -64,6 +64,26 @@ const http = (async (url: string, options: any) => {
 assert.equal((await deliverPush({ platforms: ['android'], fcm }, 'fcm', 'device-token', event, http)).invalidToken, true);
 assert.equal(calls, 2);
 assert.equal((await deliverPush(apps.demo, 'apns', 'token', event)).status, 'not_configured');
+const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+const apns = { teamId: 'team', keyId: 'key', privateKey: ec.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), bundleId: 'com.example.test', environment: 'sandbox' as const };
+const apnsTransport = ((origin: string) => {
+  assert.equal(origin, 'https://api.sandbox.push.apple.com');
+  const session = new EventEmitter() as any; session.destroy = () => {};
+  session.request = (headers: any) => {
+    assert.equal(headers['apns-topic'], apns.bundleId);
+    assert.equal(headers[':path'], '/3/device/apple-token');
+    const jwt = headers.authorization.slice(7).split('.');
+    assert.ok(verify('SHA256', Buffer.from(jwt.slice(0, 2).join('.')), { key: ec.publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(jwt[2], 'base64url')));
+    const request = new EventEmitter() as any;
+    request.end = (body: string) => {
+      assert.equal(JSON.parse(body).deepLink.id, 't1');
+      queueMicrotask(() => { request.emit('response', { ':status': 410 }); request.emit('data', JSON.stringify({ reason: 'Unregistered' })); request.emit('end'); });
+    };
+    return request;
+  };
+  return session;
+}) as any;
+assert.equal((await deliverPush({ platforms: ['ios'], apns }, 'apns', 'apple-token', event, http, apnsTransport)).invalidToken, true);
 
 const upstream = createServer((req, res) => {
   res.setHeader('content-type', 'application/json');

@@ -72,7 +72,7 @@ export class PushEngine {
     const appId = text(input.applicationId, 'applicationId', 100);
     const platform = text(input.platform, 'platform', 10);
     const provider = input.provider || (platform === 'ios' ? 'apns' : 'fcm');
-    const app = this.apps[appId];
+    const app = Object.hasOwn(this.apps, appId) ? this.apps[appId] : undefined;
     if (!app || !app.platforms.includes(platform as any)) problem('Application/platform is not registered');
     if (!['fcm', 'apns'].includes(provider) || (provider === 'apns' && platform !== 'ios')) problem('Invalid push provider');
     const installation = text(input.installationId, 'installationId', 200);

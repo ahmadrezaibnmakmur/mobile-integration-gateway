@@ -45,10 +45,11 @@ async function sendFcm(config: NonNullable<PushApp['fcm']>, token: string, messa
   if (response.ok) return { status: 'sent', code: 'FCM_ACCEPTED' };
   const data = await response.json().catch(() => ({})) as any;
   const errorCode = data.error?.details?.find((x: any) => x['@type'] === 'type.googleapis.com/google.firebase.fcm.v1.FcmError')?.errorCode;
-  return { status: 'failed', code: errorCode === 'UNREGISTERED' ? 'FCM_UNREGISTERED' : `FCM_HTTP_${response.status}`, invalidToken: errorCode === 'UNREGISTERED' };
+  const invalidToken = errorCode === 'UNREGISTERED' || (errorCode === 'INVALID_ARGUMENT' && data.error?.details?.some((x: any) => x['@type'] === 'type.googleapis.com/google.rpc.BadRequest' && x.fieldViolations?.some((v: any) => v.field === 'message.token')));
+  return { status: 'failed', code: errorCode === 'UNREGISTERED' ? 'FCM_UNREGISTERED' : invalidToken ? 'FCM_INVALID_TOKEN' : `FCM_HTTP_${response.status}`, invalidToken: Boolean(invalidToken) };
 }
 const apnsTokens = new Map<string, { token: string; expires: number }>();
-async function sendApns(config: NonNullable<PushApp['apns']>, token: string, message: PushMessage): Promise<PushResult> {
+async function sendApns(config: NonNullable<PushApp['apns']>, token: string, message: PushMessage, transport: typeof connect): Promise<PushResult> {
   const cacheKey = `${config.teamId}:${config.keyId}:${config.privateKey}`;
   let cached = apnsTokens.get(cacheKey);
   if (!cached || cached.expires < Date.now()) {
@@ -57,7 +58,7 @@ async function sendApns(config: NonNullable<PushApp['apns']>, token: string, mes
   }
   const jwt = cached.token;
   return new Promise(resolve => {
-    const client = connect(config.environment === 'sandbox' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com');
+    const client = transport(config.environment === 'sandbox' ? 'https://api.sandbox.push.apple.com' : 'https://api.push.apple.com');
     let finished = false;
     const done = (result: PushResult) => { if (finished) return; finished = true; clearTimeout(timer); client.destroy(); resolve(result); };
     const timer = setTimeout(() => done({ status: 'failed', code: 'APNS_TIMEOUT' }), 10_000);
@@ -75,10 +76,10 @@ async function sendApns(config: NonNullable<PushApp['apns']>, token: string, mes
     request.end(JSON.stringify({ aps: { alert: { title: message.title, body: message.body }, sound: 'default' }, eventId: message.eventId, deepLink: message.deepLink, resource: message.resource }));
   });
 }
-export async function deliverPush(app: PushApp | undefined, provider: string, token: string, message: PushMessage, http: typeof fetch = fetch): Promise<PushResult> {
+export async function deliverPush(app: PushApp | undefined, provider: string, token: string, message: PushMessage, http: typeof fetch = fetch, apnsTransport: typeof connect = connect): Promise<PushResult> {
   try {
     if (provider === 'fcm' && app?.fcm) return await sendFcm(app.fcm, token, message, http);
-    if (provider === 'apns' && app?.apns) return await sendApns(app.apns, token, message);
+    if (provider === 'apns' && app?.apns) return await sendApns(app.apns, token, message, apnsTransport);
     return { status: 'not_configured', code: 'PROVIDER_NOT_CONFIGURED' };
   } catch { return { status: 'failed', code: 'PROVIDER_REQUEST_FAILED' }; }
 }
