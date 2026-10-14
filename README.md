@@ -8,7 +8,11 @@ The console has no application login screen. Keep its deployment reachable only 
 
 - service health and whether AnyFlo is configured;
 - server-to-server connection to AnyFlo;
+- non-secret Mobile Admission readiness report, including the configured redirect URI and whether all server-side prerequisites are present;
 - a Mobile Admission token supplied by a developer from an authenticated mobile-app session.
+- persistent notification event deduplication, authenticated device registration, FCM/APNs adapters, and sanitized push-delivery diagnostics.
+
+See [Push notifications v1](docs/PUSH_NOTIFICATIONS.md) for environment configuration, device APIs, event contract, staging tests, and delivery limits. The push worker uses a persistent SQLite volume and a single Hub replica.
 
 ## Required server environment
 
@@ -26,4 +30,10 @@ Use `$currentUser.id`, `$currentUser.email`, `$currentUser.role.id`, or `$curren
 
 ## Agentic AI control plane
 
-The UI provides connection setup, a workflow list, live dictionary/schema inspection, an API V2 playground, and an agent guide at `GET /agent-guide`. The playground is an administrator tool and uses the saved server credential; the mobile runtime must use `/api/mobile/v1/v2` with Mobile Admission instead.
+The UI provides connection setup, a workflow list, live dictionary/schema inspection, an API V2 playground, a Mobile Admission readiness check, and an agent guide at `GET /agent-guide`. The guide supplies the Hub origin, Mobile Admission contract, readiness result, barebones scope, and explicit App Link/Universal Link next step. The playground is an administrator tool and uses the saved server credential; the mobile runtime must use `/api/mobile/v1/v2` with Mobile Admission instead.
+
+## Mobile Admission readiness
+
+The Hub calls `GET /api/mobile/v1/auth/readiness` on AnyFlo with its saved API key. That AnyFlo route returns only booleans for the Google client ID, Google client secret, Mobile JWT secret, refresh-token storage, plus the non-secret redirect URI. It never returns a credential value and is not a mobile-client endpoint.
+
+A ready report proves that the server-side admission prerequisites are configured. It does not replace live Google consent or App Link / Universal Link verification: the app package or bundle identifier and signing identity must be established first, then the association file must be published on the exact redirect host.

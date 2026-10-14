@@ -2,8 +2,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { clearHubConfig, loadHubConfig, publicHubConfig, saveHubConfig, type HubConfig } from './config.js';
+import { createPushEngine, validateEvent, verifyWebhookSecret } from './push.js';
+import { loadPushApps } from './push-providers.js';
 
 const port = Number(process.env.PORT || 3000);
+const push = createPushEngine(loadPushApps());
+push.start();
 type Json = Record<string, unknown>;
 
 function send(response: ServerResponse, status: number, body: Json) { response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); response.end(JSON.stringify(body)); }
@@ -49,6 +53,29 @@ async function anyflo(path: string, options: RequestInit = {}) {
   if (!response.ok) throw Object.assign(new Error(`AnyFlo returned ${response.status}`), { status: response.status, body });
   return body;
 }
+async function mobileAdmissionReadiness() {
+  const config = await loadHubConfig();
+  if (!config.anyfloBaseUrl || !config.anyfloApiKey) throw Object.assign(new Error('Connect AnyFlo before checking Mobile Admission readiness'), { status: 409 });
+  const response = await fetch(`${config.anyfloBaseUrl}/api/mobile/v1/auth/readiness`, {
+    headers: { 'x-api-key': config.anyfloApiKey, accept: 'application/json' },
+  });
+  const text = await response.text(); let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = { error: text }; }
+  if (!response.ok) throw Object.assign(new Error(`AnyFlo Mobile Admission readiness returned ${response.status}`), { status: response.status, body });
+  return body;
+}
+async function safeMobileAdmissionReadiness() {
+  try { return { checked: true, result: await mobileAdmissionReadiness() }; }
+  catch (error) { const item = error as { message?: string; status?: number }; return { checked: false, error: item.message || 'Readiness check unavailable', status: item.status || 502 }; }
+}
+function publicHubUrl(request: IncomingMessage) {
+  const configured = process.env.HUB_PUBLIC_URL?.replace(/\/$/, '');
+  if (configured) return configured;
+  const host = String(request.headers['x-forwarded-host'] || request.headers.host || '').split(',')[0].trim();
+  const forwardedProtocol = request.headers['x-forwarded-proto'];
+  const protocol = forwardedProtocol ? String(forwardedProtocol).split(',')[0].trim() : (/^(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(host) ? 'http' : 'https');
+  return host ? `${protocol === 'http' ? 'http' : 'https'}://${host}` : null;
+}
 async function mobileUser(request: IncomingMessage) {
   const config = await loadHubConfig();
   const token = bearer(request); if (!token || !config.anyfloBaseUrl) return null;
@@ -76,6 +103,24 @@ async function serveStatic(pathname: string, response: ServerResponse) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
   try {
+    if (request.method === 'POST' && url.pathname === '/internal/events/mobile-notification') {
+      verifyWebhookSecret(request.headers['x-anyflo-hub-secret'], process.env.MOBILE_HUB_WEBHOOK_SECRET);
+      if (!request.headers['content-type']?.startsWith('application/json')) return send(response, 415, { error: 'Content-Type application/json required' });
+      const result = push.accept(validateEvent(await jsonBody(request)));
+      return send(response, result.duplicate ? 200 : 202, result);
+    }
+    if (request.method === 'POST' && url.pathname === '/api/mobile/v1/devices') {
+      const user = await mobileUser(request);
+      if (!user || typeof user.id !== 'string' || typeof user.email !== 'string') return send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
+      return send(response, 200, push.register({ id: user.id, email: user.email }, await jsonBody(request)));
+    }
+    const deviceMatch = url.pathname.match(/^\/api\/mobile\/v1\/devices\/([^/]+)$/);
+    if (request.method === 'DELETE' && deviceMatch) {
+      const user = await mobileUser(request);
+      if (!user || typeof user.id !== 'string' || typeof user.email !== 'string') return send(response, 401, { error: 'Valid AnyFlo Mobile Admission token required' });
+      return send(response, 200, push.unregister({ id: user.id, email: user.email }, deviceMatch[1]));
+    }
+    if (request.method === 'GET' && url.pathname === '/admin/push') return send(response, 200, push.overview());
     if (request.method === 'GET' && url.pathname === '/health') { const config = await loadHubConfig(); return send(response, 200, { status: 'ok', anyfloConfigured: Boolean(config.anyfloBaseUrl && config.anyfloApiKey) }); }
     if (request.method === 'GET' && url.pathname === '/admin/overview') {
       const config = await loadHubConfig(); return send(response, 200, { ...publicHubConfig(config), mobileAdmissionCheckAvailable: true, relayTarget: 'AnyFlo API V2 per workflow', secretsAreServerOnly: true });
@@ -87,15 +132,26 @@ const server = createServer(async (request, response) => {
       await anyflo('/workflows?limit=1');
       return send(response, 200, { connected: true });
     }
+    if (request.method === 'GET' && url.pathname === '/admin/mobile-admission/readiness') return send(response, 200, await mobileAdmissionReadiness() as Json);
     if (request.method === 'GET' && url.pathname === '/admin/workflows') return send(response, 200, { result: await anyflo('/workflows') });
     const dictionaryMatch = url.pathname.match(/^\/admin\/workflows\/([^/]+)\/(dictionary|schema)$/);
     if (request.method === 'GET' && dictionaryMatch) return send(response, 200, { result: await anyflo(`/workflows/${encodeURIComponent(dictionaryMatch[1])}/${dictionaryMatch[2]}`) });
     if (request.method === 'GET' && url.pathname === '/agent-guide') return send(response, 200, {
-      title: 'AnyFlo mobile application standard', runtimeBasePath: '/api/mobile/v1/v2', authentication: 'Bearer <Mobile Admission access token>',
+      title: 'AnyFlo Mobile Admission Readiness & Barebones Guide', hubBaseUrl: publicHubUrl(request), runtimeBasePath: '/api/mobile/v1/v2', authentication: 'Bearer <Mobile Admission access token>',
+      push: { registerDevice: 'POST /api/mobile/v1/devices', unregisterDevice: 'DELETE /api/mobile/v1/devices/:deviceId', body: { applicationId: '<server-registered app>', platform: 'android | ios', provider: 'fcm | apns', installationId: '<persisted random device installation ID>', token: '<provider registration token>' }, rules: ['Use Mobile Admission bearer authentication. The server derives device ownership.', 'Register on login and whenever the provider token changes. Unregister before logout/account switching.', 'Handle deepLink as a validated route/id object; fetch ticket data using the admitted session.', 'Push may be missed or delayed; refresh app data on resume.'] },
+      mobileAdmission: {
+        authBasePath: '/api/mobile/v1/auth',
+        endpoints: { startGoogle: 'GET /google/start', exchangeCode: 'POST /google/exchange', currentProfile: 'GET /me', refresh: 'POST /refresh', logout: 'POST /logout' },
+        readiness: await safeMobileAdmissionReadiness(),
+        clientRules: ['Open Google sign-in in the system browser, never an embedded WebView.', 'Verify OAuth state before exchanging the returned code.', 'Store access and refresh tokens only in Android Keystore or iOS Keychain.', 'Do not put an AnyFlo API key, Google client secret, Mobile JWT secret, or Hub admin token in the app.'],
+        appLinkNextStep: 'Use the non-secret redirectUri reported by readiness as the App Link/Universal Link host. Before live testing, propose the Android package name or iOS bundle identifier, obtain its signing identity, then publish its association file on that exact host. Do not invent a redirect URI, package name, signing fingerprint, or association file value.',
+      },
+      barebonesScope: ['Build Google Admission login first.', 'After successful admission, show an empty authenticated Home.', 'Provide an Account page that displays the admitted user name, email, avatar when supplied, role, and department.', 'Unknown Google users must remain rejected by AnyFlo; never auto-provision them in the app.'],
+      requiredUserInputs: ['The app name and local project folder, if not already given.', 'Approval of the proposed Android package name and/or iOS bundle identifier before App Link or Universal Link configuration.', 'A physical device or emulator for final callback verification.'],
       workflowDiscovery: ['GET /workflows', 'GET /workflows/:workflowId/dictionary', 'GET /workflows/:workflowId/schema'],
       ticketOperations: ['GET /workflows/:workflowId/tickets', 'POST /workflows/:workflowId/tickets/search', 'POST /workflows/:workflowId/tickets', 'GET /tickets/:ticketId', 'PUT /tickets/:ticketId', 'PATCH /tickets/:ticketId/array-fields/:arrayField/rows/:rowId', 'POST /tickets/:ticketId/comments'],
       identityPlaceholders: ['$currentUser.id', '$currentUser.email', '$currentUser.role.id', '$currentUser.department.id'],
-      rules: ['Read the dictionary before building a form or query.', 'Use runtimeBasePath, never an AnyFlo API key in an APK.', 'Workflow Groups are web navigation, not an integration requirement.', 'Use Mobile Admission and secure device storage for mobile tokens.'],
+      rules: ['Read the dictionary before building a form or query.', 'Use hubBaseUrl + runtimeBasePath, never an AnyFlo API key in an APK.', 'Workflow Groups are web navigation, not an integration requirement.', 'Use Mobile Admission and secure device storage for mobile tokens.'],
     });
     if (request.method === 'POST' && url.pathname === '/admin/v2/request') {
       const input = await jsonBody(request) as { method?: string; path?: string; body?: unknown };
@@ -130,4 +186,4 @@ const server = createServer(async (request, response) => {
     return send(response, item.status && item.status < 500 ? item.status : 502, { error: item.message || 'Gateway request failed' });
   }
 });
-server.listen(port, () => console.log(`Mobile Integration Gateway listening on :${port}`));
+server.listen(port, () => console.log(`Mobile Integration Gateway listening on :${(server.address() as { port: number }).port}`));

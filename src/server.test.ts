@@ -6,10 +6,13 @@ const page = await readFile(new URL('../public/index.html', import.meta.url), 'u
 assert.match(source, /\/api\/mobile\/v1\/session/);
 assert.match(source, /\/api\/mobile\/v1\/v2/);
 assert.match(source, /proxyMobileAdmission/);
+assert.match(source, /\/api\/mobile\/v1\/auth\/readiness/);
+assert.match(source, /\/admin\/mobile-admission\/readiness/);
 assert.match(source, /\/api\/mobile\/v1\/storage\/presigned-url/);
 assert.match(source, /AnyFlo API V2 per workflow/);
 assert.match(source, /\$currentUser\.email/);
 assert.doesNotMatch(source, /outlet-ops|OUTLET_OPS|Outlet Ops/);
 assert.match(page, /Create ticket/);
 assert.match(page, /Update ticket/);
+assert.match(page, /Mobile Admission readiness/);
 console.log('Gateway boundary checks passed');
